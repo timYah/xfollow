@@ -1,6 +1,6 @@
 import { DetectedUser, detectPremiumUsers, DetectService } from "../utils/detector";
 import { FollowQueue } from "../utils/followQueue";
-import { getSettings, isFollowed, markAsFollowed } from "../utils/storage";
+import { getSettings, isFollowed, markAsFollowed, getRateLimitState, clearRateLimitState, checkAndResetDailyStats, getDailyLimitState, clearDailyLimitState, resetDailyStats as storageResetDailyStats } from "../utils/storage";
 import logger from "../utils/logger";
 import {
   findGlobalVisibleFollow,
@@ -171,7 +171,28 @@ export default defineContentScript({
     let queue: FollowQueue = new FollowQueue({
       minDelay: settings.minDelay,
       maxDelay: settings.maxDelay,
+      rateLimitThreshold: settings.rateLimitThreshold,
+      rateLimitDuration: settings.rateLimitDuration,
+      dailyFollowLimit: settings.dailyFollowLimit,
     });
+
+    // Check for existing rate limit on startup
+    const rateLimitState = await getRateLimitState();
+    if (rateLimitState && rateLimitState.pauseUntil > Date.now()) {
+      queue.updateRateLimitConfig(settings.rateLimitThreshold, settings.rateLimitDuration);
+      // Enter rate limit state with the saved values
+      queue.enterRateLimitState(rateLimitState.pauseUntil, rateLimitState.successSinceLastPause);
+    } else if (rateLimitState) {
+      // Rate limit expired, clear it
+      await clearRateLimitState();
+    }
+
+    // Check for daily limit state on startup
+    await checkAndResetDailyStats();
+    const dailyLimitState = await getDailyLimitState();
+    if (dailyLimitState && dailyLimitState.isLimited) {
+      queue.updateDailyLimit(settings.dailyFollowLimit);
+    }
 
     let detectService = new DetectService((user: DetectedUser) => {
       if (!detectedHandles.has(user.handle)) {
@@ -205,6 +226,25 @@ export default defineContentScript({
             ...stats,
             detectedCount: detectedHandles.size,
           });
+        }
+
+        if (message.type === "GET_RATE_LIMIT_INFO") {
+          const rateLimitInfo = queue?.getRateLimitInfo();
+          sendResponse(rateLimitInfo);
+        }
+
+        if (message.type === "GET_DAILY_LIMIT_INFO") {
+          const dailyLimitInfo = queue?.getDailyLimitInfo();
+          sendResponse(dailyLimitInfo);
+        }
+
+        if (message.type === "RESET_DAILY_STATS") {
+          (async () => {
+            await storageResetDailyStats();
+            await queue?.resumeFromDailyLimit();
+            sendResponse({ status: "ok" });
+          })();
+          return true;
         }
 
         if (message.type === "START_FOLLOW") {

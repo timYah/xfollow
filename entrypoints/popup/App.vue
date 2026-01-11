@@ -1,6 +1,6 @@
 <script lang="ts" setup>
 import { ref, onMounted, onUnmounted, computed } from 'vue';
-import { getSettings, updateSettings, resetFollowedHistory, type Settings } from '../../utils/storage';
+import { getSettings, updateSettings, resetFollowedHistory, getDailyStats, type Settings, type DailyStatsHistory } from '../../utils/storage';
 
 interface Stats {
   total: number;
@@ -8,6 +8,23 @@ interface Stats {
   processed: number;
   success: number;
   status: 'idle' | 'running' | 'paused' | 'stopped';
+}
+
+interface RateLimitInfo {
+  isRateLimited: boolean;
+  pauseUntil: number | null;
+  remainingMs: number | null;
+  threshold: number;
+  duration: number;
+  successSincePause: number;
+}
+
+interface DailyLimitInfo {
+  isDailyLimited: boolean;
+  todayCount: number;
+  limit: number;
+  remaining: number;
+  resetAt: number | null;
 }
 
 const stats = ref<Stats>({
@@ -20,10 +37,30 @@ const stats = ref<Stats>({
 
 const detectedCount = ref(0);
 const showSettings = ref(false);
+const rateLimitInfo = ref<RateLimitInfo>({
+  isRateLimited: false,
+  pauseUntil: null,
+  remainingMs: null,
+  threshold: 10,
+  duration: 600000,
+  successSincePause: 0,
+});
+const dailyLimitInfo = ref<DailyLimitInfo>({
+  isDailyLimited: false,
+  todayCount: 0,
+  limit: 100,
+  remaining: 100,
+  resetAt: null,
+});
+const showDailyStats = ref(false);
+const dailyStatsHistory = ref<{ date: string; count: number }[]>([]);
 const settings = ref<Settings>({
   minDelay: 1500,
   maxDelay: 4000,
-  skipFollowed: true
+  skipFollowed: true,
+  rateLimitThreshold: 10,
+  rateLimitDuration: 600000,
+  dailyFollowLimit: 100,
 });
 
 const fetchStatus = async () => {
@@ -44,11 +81,19 @@ const fetchStatus = async () => {
 };
 
 const loadSettings = async () => {
-  settings.value = await getSettings();
+  const savedSettings = await getSettings();
+  settings.value = {
+    ...savedSettings,
+    rateLimitDuration: savedSettings.rateLimitDuration / 60000
+  };
 };
 
 const saveSettings = async () => {
-  await updateSettings(settings.value);
+  const settingsToSave = {
+    ...settings.value,
+    rateLimitDuration: settings.value.rateLimitDuration * 60000
+  };
+  await updateSettings(settingsToSave);
   showSettings.value = false;
 };
 
@@ -75,6 +120,63 @@ const stopFollowing = async () => {
   }
 };
 
+const fetchRateLimitInfo = async () => {
+  try {
+    const tabs = await browser.tabs.query({ active: true, currentWindow: true });
+    if (tabs[0]?.id) {
+      const response = await browser.tabs.sendMessage(tabs[0].id, { type: 'GET_RATE_LIMIT_INFO' });
+      if (response) {
+        rateLimitInfo.value = response;
+        if (response.pauseUntil) {
+          rateLimitInfo.value.remainingMs = Math.max(0, response.pauseUntil - Date.now());
+        }
+      }
+    }
+  } catch (error) {
+    console.error('Failed to fetch rate limit info:', error);
+  }
+};
+
+const fetchDailyLimitInfo = async () => {
+  try {
+    const tabs = await browser.tabs.query({ active: true, currentWindow: true });
+    if (tabs[0]?.id) {
+      const response = await browser.tabs.sendMessage(tabs[0].id, { type: 'GET_DAILY_LIMIT_INFO' });
+      if (response) {
+        dailyLimitInfo.value = response;
+        if (response.resetAt) {
+          dailyLimitInfo.value.resetAt = response.resetAt;
+        }
+      }
+    }
+  } catch (error) {
+    console.error('Failed to fetch daily limit info:', error);
+  }
+};
+
+const fetchDailyStatsHistory = async () => {
+  const dailyStats = await getDailyStats();
+  dailyStatsHistory.value = dailyStats.history.map(d => ({
+    date: d.date,
+    count: d.count
+  }));
+};
+
+const resetDailyStats = async () => {
+  if (confirm('Are you sure you want to reset daily stats?')) {
+    const tabs = await browser.tabs.query({ active: true, currentWindow: true });
+    if (tabs[0]?.id) {
+      await browser.tabs.sendMessage(tabs[0].id, { type: 'RESET_DAILY_STATS' });
+      alert('Daily stats reset successfully!');
+    }
+  }
+};
+
+const formatDate = (dateStr: string) => {
+  const date = new Date(dateStr);
+  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+};
+
 // Listen for updates from content script
 const handleMessage = (message: any) => {
   if (message.type === 'USERS_UPDATED') {
@@ -87,7 +189,14 @@ let timer: number;
 onMounted(() => {
   fetchStatus();
   loadSettings();
-  timer = window.setInterval(fetchStatus, 1000);
+  fetchRateLimitInfo();
+  fetchDailyLimitInfo();
+  fetchDailyStatsHistory();
+  timer = window.setInterval(() => {
+    fetchStatus();
+    fetchRateLimitInfo();
+    fetchDailyLimitInfo();
+  }, 1000);
   browser.runtime.onMessage.addListener(handleMessage);
 });
 
@@ -99,6 +208,26 @@ onUnmounted(() => {
 const progressWidth = computed(() => {
   if (stats.value.total === 0) return '0%';
   return `${(stats.value.processed / stats.value.total) * 100}%`;
+});
+
+const timeRemaining = computed(() => {
+  if (!rateLimitInfo.value.remainingMs) return '0:00';
+  const minutes = Math.floor(rateLimitInfo.value.remainingMs / 60000);
+  const seconds = Math.floor((rateLimitInfo.value.remainingMs % 60000) / 1000);
+  return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+});
+
+const dailyProgressPercent = computed(() => {
+  if (dailyLimitInfo.value.limit === 0) return '0%';
+  return `${(dailyLimitInfo.value.todayCount / dailyLimitInfo.value.limit) * 100}%`;
+});
+
+const timeUntilReset = computed(() => {
+  if (!dailyLimitInfo.value.resetAt) return '';
+  const ms = dailyLimitInfo.value.resetAt - Date.now();
+  const hours = Math.floor(ms / 3600000);
+  const minutes = Math.floor((ms % 3600000) / 60000);
+  return `${hours}h ${minutes}m`;
 });
 </script>
 
@@ -113,12 +242,46 @@ const progressWidth = computed(() => {
     </header>
 
     <main v-if="!showSettings">
+      <div v-if="rateLimitInfo.isRateLimited" class="card rate-limit-card">
+        <div class="rate-limit-icon">⏸️</div>
+        <h3>Rate Limit Active</h3>
+        <p class="rate-limit-text">
+          Paused after {{ rateLimitInfo.successSincePause }} successful follows.
+        </p>
+        <div class="countdown">
+          <span class="countdown-label">Resuming in</span>
+          <span class="countdown-time">{{ timeRemaining }}</span>
+        </div>
+      </div>
+
+      <div v-if="dailyLimitInfo.isDailyLimited" class="card daily-limit-card">
+        <div class="daily-limit-icon">📅</div>
+        <h3>Daily Limit Reached</h3>
+        <p class="daily-limit-text">
+          You've reached your daily limit of {{ dailyLimitInfo.limit }} follows.
+        </p>
+        <div class="countdown">
+          <span class="countdown-label">Resets in</span>
+          <span class="countdown-time">{{ timeUntilReset }}</span>
+        </div>
+      </div>
+
       <div class="card status-card">
         <div class="stat-item">
           <span class="label">Detected Premium</span>
           <span class="value">{{ detectedCount }}</span>
         </div>
-        
+
+        <div class="daily-limit-section">
+          <div class="stat-row">
+            <span class="daily-label">Today: {{ dailyLimitInfo.todayCount }}/{{ dailyLimitInfo.limit }}</span>
+            <span class="daily-remaining">{{ dailyLimitInfo.remaining }} remaining</span>
+          </div>
+          <div class="progress-bar">
+            <div class="progress-fill daily-progress" :style="{ width: dailyProgressPercent }"></div>
+          </div>
+        </div>
+
         <div v-if="stats.status !== 'idle' && stats.status !== 'stopped'" class="progress-section">
           <div class="stat-row">
             <span>Following... {{ stats.processed }} / {{ stats.total }}</span>
@@ -131,7 +294,7 @@ const progressWidth = computed(() => {
       </div>
 
       <div class="actions">
-        <button v-if="stats.status === 'idle' || stats.status === 'stopped'" @click="startFollowing" class="btn-primary" :disabled="detectedCount === 0">
+        <button v-if="!rateLimitInfo.isRateLimited && !dailyLimitInfo.isDailyLimited && (stats.status === 'idle' || stats.status === 'stopped')" @click="startFollowing" class="btn-primary" :disabled="detectedCount === 0">
           Start Following All
         </button>
         <button v-else @click="stopFollowing" class="btn-danger">
@@ -140,6 +303,46 @@ const progressWidth = computed(() => {
 
         <button @click="showSettings = true" class="btn-secondary">
           ⚙️ Settings
+        </button>
+      </div>
+    </main>
+
+    <main v-else-if="showDailyStats" class="stats-panel">
+      <h2>Daily Statistics</h2>
+
+      <div class="card">
+        <div class="today-stats">
+          <div class="stat-item">
+            <span class="label">Today</span>
+            <span class="value">{{ dailyLimitInfo.todayCount }}</span>
+          </div>
+          <div class="stat-item">
+            <span class="label">Limit</span>
+            <span class="value">{{ dailyLimitInfo.limit }}</span>
+          </div>
+        </div>
+      </div>
+
+      <h3>Previous Days</h3>
+      <div v-if="dailyStatsHistory.length === 0" class="empty-state">
+        <p>No previous stats available</p>
+      </div>
+      <div v-else class="history-list">
+        <div v-for="day in dailyStatsHistory" :key="day.date" class="history-item">
+          <span class="history-date">{{ formatDate(day.date) }}</span>
+          <span class="history-count">{{ day.count }} follows</span>
+        </div>
+      </div>
+
+      <div class="setting-group">
+        <button @click="resetDailyStats" class="btn-danger-outline">
+          Reset Daily Stats
+        </button>
+      </div>
+
+      <div class="actions">
+        <button @click="showDailyStats = false" class="btn-secondary">
+          Back
         </button>
       </div>
     </main>
@@ -162,6 +365,30 @@ const progressWidth = computed(() => {
       <div class="setting-group">
         <label>Max Delay (ms)</label>
         <input type="number" v-model.number="settings.maxDelay" min="1000" max="10000" />
+      </div>
+
+      <div class="setting-group">
+        <label>Rate Limit Follows</label>
+        <input type="number" v-model.number="settings.rateLimitThreshold" min="1" max="100" />
+        <small class="setting-hint">Pause after this many successful follows</small>
+      </div>
+
+      <div class="setting-group">
+        <label>Rate Limit Duration (minutes)</label>
+        <input type="number" v-model.number="settings.rateLimitDuration" :min="1" :step="1" />
+        <small class="setting-hint">Duration to pause in minutes</small>
+      </div>
+
+      <div class="setting-group">
+        <label>Daily Follow Limit</label>
+        <input type="number" v-model.number="settings.dailyFollowLimit" min="1" max="1000" />
+        <small class="setting-hint">Maximum follows per day</small>
+      </div>
+
+      <div class="setting-group">
+        <button @click="showDailyStats = true; showSettings = false" class="btn-secondary">
+          📊 View Daily Stats History
+        </button>
       </div>
 
       <div class="setting-group">
@@ -266,6 +493,12 @@ h2 {
   margin: 0 0 16px 0;
 }
 
+h3 {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0 0 12px 0;
+}
+
 .subtitle {
   font-size: 14px;
   color: var(--text-muted);
@@ -333,6 +566,137 @@ h2 {
   height: 100%;
   background-color: var(--primary);
   transition: width 0.3s ease;
+}
+
+.daily-limit-section {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.daily-label {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.daily-remaining {
+  font-size: 12px;
+  color: var(--primary);
+  font-weight: 600;
+}
+
+.daily-progress {
+  background-color: var(--primary);
+  opacity: 0.7;
+}
+
+.rate-limit-card {
+  background: linear-gradient(135deg, rgba(29, 155, 240, 0.1), rgba(29, 155, 240, 0.05));
+  border: 1px solid var(--primary);
+  text-align: center;
+}
+
+.rate-limit-icon {
+  font-size: 32px;
+  margin-bottom: 8px;
+}
+
+.rate-limit-card h3 {
+  font-size: 16px;
+  font-weight: 700;
+  margin: 0 0 8px 0;
+  color: var(--primary);
+}
+
+.rate-limit-text {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin: 0 0 16px 0;
+}
+
+.countdown {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.countdown-label {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.countdown-time {
+  font-size: 28px;
+  font-weight: 800;
+  color: var(--primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.daily-limit-card {
+  background: linear-gradient(135deg, rgba(255, 149, 0, 0.1), rgba(255, 149, 0, 0.05));
+  border: 1px solid #ff9500;
+  text-align: center;
+}
+
+.daily-limit-icon {
+  font-size: 32px;
+  margin-bottom: 8px;
+}
+
+.daily-limit-card h3 {
+  font-size: 16px;
+  font-weight: 700;
+  margin: 0 0 8px 0;
+  color: #ff9500;
+}
+
+.daily-limit-text {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin: 0 0 16px 0;
+}
+
+.stats-panel {
+  animation: slideIn 0.3s ease;
+}
+
+.today-stats {
+  display: flex;
+  gap: 24px;
+}
+
+.today-stats .stat-item {
+  flex: 1;
+}
+
+.empty-state {
+  text-align: center;
+  padding: 24px;
+  color: var(--text-muted);
+}
+
+.history-list {
+  margin-top: 16px;
+}
+
+.history-item {
+  display: flex;
+  justify-content: space-between;
+  padding: 12px;
+  border-radius: 8px;
+  background-color: var(--card-bg);
+  margin-bottom: 8px;
+}
+
+.history-date {
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.history-count {
+  font-weight: 600;
+  color: var(--text);
 }
 
 .actions {
@@ -458,6 +822,13 @@ h2 {
 .setting-group input[type="number"]:focus {
   outline: 2px solid var(--primary);
   outline-offset: 2px;
+}
+
+.setting-hint {
+  display: block;
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 4px;
 }
 
 footer {
