@@ -267,14 +267,20 @@ const timeUntilReset = computed(() => {
       </div>
 
       <div class="card status-card">
-        <div class="stat-item">
-          <span class="label">Detected Premium</span>
-          <span class="value">{{ detectedCount }}</span>
+        <div class="stats-row">
+          <div class="stat-item">
+            <span class="label">Detected Premium</span>
+            <span class="value">{{ detectedCount }}</span>
+          </div>
+          <div class="stat-item">
+            <span class="label">Today's Follows</span>
+            <span class="value">{{ dailyLimitInfo.todayCount }}</span>
+          </div>
         </div>
 
         <div class="daily-limit-section">
           <div class="stat-row">
-            <span class="daily-label">Today: {{ dailyLimitInfo.todayCount }}/{{ dailyLimitInfo.limit }}</span>
+            <span class="daily-label">{{ dailyLimitInfo.todayCount }}/{{ dailyLimitInfo.limit }}</span>
             <span class="daily-remaining">{{ dailyLimitInfo.remaining }} remaining</span>
           </div>
           <div class="progress-bar">
@@ -524,6 +530,15 @@ h3 {
   gap: 4px;
 }
 
+.stats-row {
+  display: flex;
+  gap: 24px;
+}
+
+.stats-row .stat-item {
+  flex: 1;
+}
+
 .label {
   font-size: 13px;
   color: var(--text-muted);
@@ -533,6 +548,10 @@ h3 {
   font-size: 32px;
   font-weight: 800;
   animation: countUp 0.5s ease;
+}
+
+.stats-row .value {
+  font-size: 28px;
 }
 
 @keyframes countUp {

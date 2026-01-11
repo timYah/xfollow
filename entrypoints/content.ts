@@ -165,6 +165,7 @@ export default defineContentScript({
   async main() {
     logger.info("[xfollow] Content script initialized.");
     const settings = await getSettings();
+    const dailyStats = await getDailyStats();
     let detectedHandles = new Set<string>();
     let detectedUsers = new Array<DetectedUser>();
 
@@ -174,6 +175,7 @@ export default defineContentScript({
       rateLimitThreshold: settings.rateLimitThreshold,
       rateLimitDuration: settings.rateLimitDuration,
       dailyFollowLimit: settings.dailyFollowLimit,
+      todayCount: dailyStats.today.count,
     });
 
     // Check for existing rate limit on startup

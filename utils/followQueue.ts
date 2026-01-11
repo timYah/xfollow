@@ -28,12 +28,13 @@ export class FollowQueue {
   private pauseDuration = 600000;
   private dailyLimit = 100;
 
-  constructor(options?: { minDelay?: number; maxDelay?: number; rateLimitThreshold?: number; rateLimitDuration?: number; dailyFollowLimit?: number; }) {
+  constructor(options?: { minDelay?: number; maxDelay?: number; rateLimitThreshold?: number; rateLimitDuration?: number; dailyFollowLimit?: number; todayCount?: number; }) {
     if (options?.minDelay) this.minDelay = options.minDelay;
     if (options?.maxDelay) this.maxDelay = options.maxDelay;
     if (options?.rateLimitThreshold) this.pauseThreshold = options.rateLimitThreshold;
     if (options?.rateLimitDuration) this.pauseDuration = options.rateLimitDuration;
     if (options?.dailyFollowLimit) this.dailyLimit = options.dailyFollowLimit;
+    if (options?.todayCount !== undefined) this.todayFollowCount = options.todayCount;
   }
 
   public add(task: FollowTask) {
